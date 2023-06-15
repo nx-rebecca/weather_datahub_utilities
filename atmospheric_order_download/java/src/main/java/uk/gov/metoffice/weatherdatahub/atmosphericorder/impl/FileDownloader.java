@@ -1,5 +1,7 @@
 package uk.gov.metoffice.weatherdatahub.atmosphericorder.impl;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import uk.gov.metoffice.weatherdatahub.atmosphericorder.utils.HttpUtils;
 
 import java.io.FileOutputStream;
@@ -20,6 +22,8 @@ public class FileDownloader implements Callable {
     private String apiHost;
     private String path;
 
+    private static final Logger LOG = LoggerFactory.getLogger(FileDownloader.class);
+
     public FileDownloader(String fileID, String clientId, String clientSecret, String orderId, String apiHost, String path) {
         this.fileID = fileID;
         this.clientId = clientId;
@@ -32,9 +36,9 @@ public class FileDownloader implements Callable {
     @Override
     public Map<String, Integer> call() {
 
-        String endpoint = "/latest/" + this.fileID + "/data";
+        String endpoint = "/orders/" + this.orderId + "/latest/" + this.fileID + "/data";
 
-        final String URL = HttpUtils.getURL(endpoint, this.orderId, this.apiHost);
+        final String URL = HttpUtils.getURL(endpoint, this.apiHost);
 
         HttpClient client = HttpUtils.getHttpClient();
 
@@ -50,18 +54,20 @@ public class FileDownloader implements Callable {
             if (response.statusCode() == 200) {
                 FileOutputStream fos = new FileOutputStream(localGribFile);
                 fos.write(response.body());
-                System.out.println("GRIB file of " + fos.getChannel().size() + " bytes saved as " + localGribFile);
+                LOG.debug("GRIB file of " + fos.getChannel().size() + " bytes saved as " + localGribFile);
                 report.put(fileID, response.statusCode());
             } else {
-                System.err.println("Status code: " + response.statusCode());
+                LOG.warn("Status code: " + response.statusCode());
                 report.put(fileID, response.statusCode());
 
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            //e.printStackTrace();
+            LOG.warn("Download failed.", e);
             report.put(fileID, 600);
         } catch (InterruptedException e) {
-            e.printStackTrace();
+//            e.printStackTrace();
+            LOG.warn("Download failed.", e);
             report.put(fileID, 600);
         }
 

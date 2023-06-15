@@ -19,6 +19,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Application that is responsible for retrieving
@@ -36,7 +38,7 @@ public class OrderDownloader {
     private final int workers;
     private String directoryPath;
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(OrderDownloader.class);
+    private static final Logger LOG = LoggerFactory.getLogger(OrderDownloader.class);
 
 //    private static final Logger;
 
@@ -50,46 +52,140 @@ public class OrderDownloader {
         this.directoryPath = directoryPath;
     }
 
-    public List getFileIdsforDownload() throws DownloadException {
+    public List getFileIdsforDownload(boolean downloadAll) throws DownloadException {
 
-        List fileIds = new ArrayList<String>();
+        List<String> fileIds = new ArrayList<>();
 
         try {
-            HttpResponse<String> response = sendLatestRequest("application/json", "/latest");
+            JSONObject order = getOrder();
+            String modelId = getModelIdFromOrder(order);
+            System.out.println(modelId);
+            HttpResponse<String> response = sendLatestRequest();
 
             if (response.statusCode() != 200) {
                 throw new DownloadException("Request for file list failed. HttpStatus code: " + response.statusCode());
             }
 
             JSONObject responseBody = new JSONObject(response.body());
-            JSONObject order = responseBody.getJSONObject("orderDetails");
-            JSONArray files = new JSONArray(order.getString("files"));
-            this.runDateTime = files.getJSONObject(0).getString("runDateTime").replace(":", "");
+            JSONObject orderDetails = responseBody.getJSONObject("orderDetails");
+            JSONArray files = new JSONArray(orderDetails.getString("files"));
+            addFileIds(fileIds, files, downloadAll, modelId, order);
 
-            for (int i = 0; i < files.length(); i++) {
-                fileIds.add(files.getJSONObject(i).getString("fileId"));
-            }
 
         } catch (IOException | InterruptedException | JSONException ex) {
-            throw new DownloadException("Failed to retrieve file list" + ex.getMessage(), ex.getCause());
+            throw new DownloadException("Failed to retrieve file list: " + ex.getMessage(), ex.getCause());
         }
 
+        LOG.info("Files to download: " + fileIds.size());
+
         return fileIds;
+    }
+
+    private void addFileIds(List<String> fileIds, JSONArray files, boolean downloadAll, String modelId, JSONObject order) throws JSONException, IOException, InterruptedException {
+
+        if (downloadAll) {
+            this.runDateTime = files.getJSONObject(0).getString("runDateTime").replace(":", "");
+        } else {
+            String latestRun = getLatestRun(modelId, order);
+            this.runDateTime = latestRun;
+        }
+
+        for (int i = 0; i < files.length(); i++) {
+            JSONObject file = files.getJSONObject(i);
+            String fileId = file.getString("fileId");
+            Pattern special = Pattern.compile("[+]");
+            Matcher hasSpecial = special.matcher(fileId);
+            if (downloadAll) {
+                if (hasSpecial.find()) {
+                    fileIds.add(fileId);
+                }
+            } else {
+                if (hasSpecial.find() && file.getString("runDateTime").replace(":", "").equals(runDateTime)) {
+                    fileIds.add(fileId);
+            }
+            }
+
+        }
+    }
+
+    private String getLatestRun(String modelId, JSONObject order) throws IOException, InterruptedException, JSONException {
+        HttpResponse<String> runsResponse = sendRunsRequest(modelId);
+        JSONArray requiredRuns = getRequiredRunsFromOrder(order);
+        JSONObject runsCompleted = new JSONObject(runsResponse.body());
+        JSONArray runs = new JSONArray(runsCompleted.getString("completeRuns"));
+        StringBuilder latestRun = new StringBuilder();
+        for (int i = 0; i < runs.length(); i++) {
+            JSONObject run = runs.getJSONObject(i);
+            for (int j = 0; j < requiredRuns.length(); j++) {
+                if (run.getString("run").equals(requiredRuns.getString(j))) {
+                    break;
+                } else if (j == requiredRuns.length() - 1) {
+                    runs.remove(i);
+                    i --;
+                }
+            }
+        }
+        for (int i = 0; i < runs.length(); i++) {
+            JSONObject run = runs.getJSONObject(i);
+            String runFilter = run.getString("runFilter");
+            if (i != runs.length() - 1) {
+                JSONObject nextRun = runs.getJSONObject(i + 1);
+                String nextRunFilter = nextRun.getString("runFilter");
+                if (Integer.parseInt(runFilter) > Integer.parseInt(nextRunFilter)) {
+                    latestRun.append(run.getString("runDateTime").replace(":", ""));
+                    break;
+                }
+            } else {
+                latestRun.append(run.getString("runDateTime").replace(":", ""));
+            }
+
+        }
+        return latestRun.toString();
+    }
+
+    private JSONObject getOrder() throws IOException, InterruptedException, JSONException {
+        HttpResponse<String> response = sendOrdersRequest();
+        JSONObject responseJSON = new JSONObject(response.body());
+        JSONArray orders = new JSONArray(responseJSON.getString("orders"));
+        for (int i = 0; i < orders.length(); i++) {
+            JSONObject order = orders.getJSONObject(i);
+            if (order.getString("orderId").equals(this.orderId)) {
+                return order;
+            }
+        }
+        return null;
+    }
+
+    private String getModelIdFromOrder(JSONObject order) throws JSONException {
+        return order.getString("modelId");
+    }
+
+    private JSONArray getRequiredRunsFromOrder(JSONObject order) throws JSONException {
+        return new JSONArray(order.getString("requiredLatestRuns"));
+    }
+
+    private HttpResponse<String> sendRunsRequest(String modelID) throws IOException, InterruptedException {
+        String accept = "application/json";
+        String endpoint = "/runs/" + modelID;
+
+        final String URL = HttpUtils.getURL(endpoint, API_HOST);
+        HttpClient client = HttpUtils.getHttpClient();
+        HttpRequest request = HttpUtils.getHttpRequest(accept, URL, clientID, clientSecret);
+
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     public void downloadFiles(List<String> fileIds) throws DownloadException {
 
         int retries = 0;
+        int downloadedFiles = 0;
         List<String> errors = new ArrayList<String>();
 
         while (retries < 5) {
             ExecutorService executorService = null;
-            if (retries > 0) {
-                System.out.println("Retrying...");
-            }
             try {
 
-                String path = directoryPath + "/downloads/" + runDateTime;
+                String path = directoryPath + "/downloads/" + orderId + "/" + runDateTime;
                 Files.createDirectories(Paths.get(path));
 
                 executorService = Executors.newFixedThreadPool(workers);
@@ -108,6 +204,10 @@ public class OrderDownloader {
                     for (Map.Entry<String, Integer> pair : report.entrySet()) {
                         if (pair.getValue() >= 500) {
                             errors.add(pair.getKey());
+                        } else if (pair.getValue() != 200) {
+                            LOG.error("Download failed. Status code: {}", pair.getValue());
+                        } else if (pair.getValue() == 200) {
+                            downloadedFiles++;
                         }
                     }
                 }
@@ -120,20 +220,43 @@ public class OrderDownloader {
             }
 
             if (errors.size() != 0) {
+                LOG.debug("Errors: {}", errors.size());
                 retries++;
+                fileIds = errors;
+                errors.clear();
+                LOG.warn("Downloaded {} files. Download errors : {}. Retrying.", downloadedFiles, fileIds.size());
+                downloadedFiles = 0;
                 try {
-                    Thread.sleep(10000);
+                    int backoff = (int) Math.random() * 1000000;
+                    Thread.sleep(backoff);
                 } catch (InterruptedException e) {
                     // Do nothing
                 }
-            } else break;
+            } else {
+                LOG.info("Downloaded {} files.", downloadedFiles);
+                break;
+            }
         }
     }
 
-    public HttpResponse<String> sendLatestRequest(String accept, String endpoint)
+    private HttpResponse<String> sendLatestRequest()
             throws IOException, InterruptedException {
 
-        final String URL = HttpUtils.getURL(endpoint, orderId, API_HOST);
+        String accept = "application/json";
+        String endpoint = "/orders/" + this.orderId + "/latest";
+
+        final String URL = HttpUtils.getURL(endpoint, API_HOST);
+        HttpClient client = HttpUtils.getHttpClient();
+        HttpRequest request = HttpUtils.getHttpRequest(accept, URL, clientID, clientSecret);
+
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> sendOrdersRequest() throws IOException, InterruptedException {
+        String accept = "application/json";
+        String endpoint = "/orders";
+
+        final String URL = HttpUtils.getURL(endpoint, API_HOST);
         HttpClient client = HttpUtils.getHttpClient();
         HttpRequest request = HttpUtils.getHttpRequest(accept, URL, clientID, clientSecret);
 

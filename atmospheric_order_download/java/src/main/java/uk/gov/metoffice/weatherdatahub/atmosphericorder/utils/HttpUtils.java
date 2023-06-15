@@ -30,7 +30,7 @@ public class HttpUtils {
                 .build();
     }
 
-    public static String getURL(String endpoint, String orderId, String apiHost) {
-        return "https://" + apiHost + "/1.0.0/orders/" + orderId + endpoint;
+    public static String getURL(String endpoint, String apiHost) {
+        return "https://" + apiHost + "/1.0.0" + endpoint;
     }
 }
