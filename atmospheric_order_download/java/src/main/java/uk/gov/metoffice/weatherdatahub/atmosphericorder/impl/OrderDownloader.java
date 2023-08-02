@@ -34,6 +34,7 @@ public class OrderDownloader {
     private final String clientID;
     private final String clientSecret;
     private static final String API_HOST = "api-metoffice.apiconnect.ibmcloud.com";
+//    private static final String API_HOST =  "rgw.5878-e94b1c46.eu-gb.apiconnect.appdomain.cloud/metoffice-ci/ci";
     private String runDateTime;
     private final int workers;
     private String directoryPath;
